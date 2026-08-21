@@ -236,8 +236,28 @@ if prompt := st.chat_input("Ask a question, check order status, or request a ser
     with st.chat_message("assistant"):
         with st.spinner("Processing request and executing tools..."):
             try:
+                # Attempt to send the message to the model
                 response = st.session_state.chat_session.send_message(prompt)
+                
                 st.markdown(response.text)
                 st.session_state.messages.append({"role": "assistant", "content": response.text})
+                
+            except errors.APIError as e:
+                # Specifically catch Google GenAI API errors
+                if e.code == 429:
+                    error_msg = (
+                        "⚠️ **High Traffic Detected:** The AI is currently experiencing high demand "
+                        "and has reached its free-tier rate limit. Please wait about 30 seconds and try again."
+                    )
+                    st.warning(error_msg)
+                    # We remove the user's prompt from the history so it doesn't break the chat context turn order
+                    st.session_state.messages.pop() 
+                else:
+                    st.error(f"⚠️ An API error occurred: {e.message}")
+                    st.session_state.messages.pop()
+                    
             except Exception as e:
-                st.error(f"Error during execution: {str(e)}")
+                # Catch-all for any other unexpected Python errors
+                st.error("⚠️ An unexpected system error occurred. Please try again.")
+                # We remove the user's prompt from the history to maintain conversational sync
+                st.session_state.messages.pop()
