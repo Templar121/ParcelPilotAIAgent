@@ -3,7 +3,7 @@ import pandas as pd
 import json
 from datetime import datetime
 from google import genai
-from google.genai import types
+from google.genai import types, errors
 
 # -----------------------------------------------------------------------------
 # 1. UI CONFIGURATION & SESSION CONTEXT
