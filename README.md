@@ -48,7 +48,7 @@ pip install -r requirements.txt
 ```bash
 GROQ_API_KEY = "gsk_YOUR_GROQ_KEY_HERE"
 ```
-### 6. 6. Run the Application
+### 6. Run the Application
 ```bash
 streamlit run app.py
 ```
