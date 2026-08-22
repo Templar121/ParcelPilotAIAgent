@@ -41,7 +41,7 @@ if "last_context_key" not in st.session_state or st.session_state.last_context_k
     st.session_state.messages = []
     
     st.session_state.chat_session = st.session_state.client.chats.create(
-        model="gemini-2.5-flash",
+        model="gemini-3.6-flash",
         config=types.GenerateContentConfig(
             system_instruction=get_system_prompt(user_role, account_id, SNAPSHOT_TIME_STR),
             tools=[search_documents, query_structured_data, execute_action],
