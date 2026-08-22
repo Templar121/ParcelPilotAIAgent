@@ -103,7 +103,7 @@ if prompt := st.chat_input("Ask a question, check order status, or request a ser
                 system_instruction = get_system_prompt(user_role, account_id, SNAPSHOT_TIME_STR)
                 messages_payload = [{"role": "system", "content": system_instruction}] + st.session_state.messages
                 
-                # 2. Call Groq
+                # 2. Initial Call to Groq
                 response = st.session_state.client.chat.completions.create(
                     model="openai/gpt-oss-120b",
                     messages=messages_payload,
@@ -114,9 +114,14 @@ if prompt := st.chat_input("Ask a question, check order status, or request a ser
                 
                 response_message = response.choices[0].message
                 
-                # 3. Handle Tool Calls if the AI decides to use them
-                if response_message.tool_calls:
-                    # Append the AI's tool request to history
+                # 3. Agentic Loop: Keep executing tools as long as the model requests them (max 5 steps)
+                MAX_STEPS = 5
+                step_count = 0
+                
+                while response_message.tool_calls and step_count < MAX_STEPS:
+                    step_count += 1
+                    
+                    # Append the AI's tool request to our history
                     st.session_state.messages.append({
                         "role": "assistant", 
                         "tool_calls": [t.model_dump() for t in response_message.tool_calls],
@@ -124,19 +129,27 @@ if prompt := st.chat_input("Ask a question, check order status, or request a ser
                     })
                     messages_payload.append(response_message)
                     
-                    # Execute each tool
+                    # Execute every tool requested in this step
                     for tool_call in response_message.tool_calls:
                         fn_name = tool_call.function.name
-                        args = json.loads(tool_call.function.arguments)
-                        
-                        if fn_name == "search_documents":
-                            tool_result = search_documents(args["query"])
-                        elif fn_name == "query_structured_data":
-                            tool_result = query_structured_data(args["order_id"])
-                        elif fn_name == "execute_action":
-                            tool_result = execute_action(args["action_type"], args["details"], args.get("confirmed", False))
-                        
-                        # Add tool result to context
+                        try:
+                            args = json.loads(tool_call.function.arguments)
+                            if fn_name == "search_documents":
+                                tool_result = search_documents(args.get("query", ""))
+                            elif fn_name == "query_structured_data":
+                                tool_result = query_structured_data(args.get("order_id", ""))
+                            elif fn_name == "execute_action":
+                                tool_result = execute_action(
+                                    args.get("action_type", ""), 
+                                    args.get("details", ""), 
+                                    args.get("confirmed", False)
+                                )
+                            else:
+                                tool_result = f"Error: Unknown function {fn_name}"
+                        except Exception as e:
+                            tool_result = f"Error processing tool call: {str(e)}"
+                            
+                        # Add the execution result to the conversation
                         tool_msg = {
                             "tool_call_id": tool_call.id,
                             "role": "tool",
@@ -146,22 +159,23 @@ if prompt := st.chat_input("Ask a question, check order status, or request a ser
                         st.session_state.messages.append(tool_msg)
                         messages_payload.append(tool_msg)
                     
-                    # 4. Trigger second Groq call so it can read the tool results and answer
-                    final_response = st.session_state.client.chat.completions.create(
+                    # Trigger the next Groq call to analyze the tool results
+                    next_response = st.session_state.client.chat.completions.create(
                         model="openai/gpt-oss-120b",
                         messages=messages_payload,
                         tools=GROQ_TOOLS,
                         temperature=0.1
                     )
-                    final_text = final_response.choices[0].message.content
-                    st.markdown(final_text)
-                    st.session_state.messages.append({"role": "assistant", "content": final_text})
+                    response_message = next_response.choices[0].message
                 
-                # Handle standard text response without tools
-                else:
-                    st.markdown(response_message.content)
-                    st.session_state.messages.append({"role": "assistant", "content": response_message.content})
+                # 4. Once the loop finishes (no more tools), output the final text
+                final_text = response_message.content if response_message.content else "I have completed the task."
+                
+                st.markdown(final_text)
+                st.session_state.messages.append({"role": "assistant", "content": final_text})
                     
             except Exception as e:
                 st.error(f"⚠️ An error occurred: {str(e)}")
-                st.session_state.messages.pop() # Remove failed prompt to keep history clean
+                # Remove failed prompt to keep history clean
+                if len(st.session_state.messages) > 0 and st.session_state.messages[-1]["role"] == "user":
+                    st.session_state.messages.pop()
