@@ -1,7 +1,7 @@
 # Contains streamlit UI, session state, & Gemini client loop
 import streamlit as st
-from google import genai
-from google.genai import types, errors
+import json
+from groq import Groq
 from mock_data import SNAPSHOT_TIME_STR
 from tools import search_documents, query_structured_data, execute_action, set_tool_context
 from prompts import get_system_prompt
@@ -25,53 +25,142 @@ st.title("ParcelPilot AI Support & Operations")
 # Sync tool context with selected UI role/account
 set_tool_context(user_role, account_id)
 
-# Initialize Gemini Client
+# Initialize Groq Client
 if "client" not in st.session_state:
     try:
-        api_key = st.secrets["GEMINI_API_KEY"]
+        api_key = st.secrets["GROQ_API_KEY"]
     except KeyError:
-        st.error("Please configure 'GEMINI_API_KEY' in .streamlit/secrets.toml")
+        st.error("Please configure 'GROQ_API_KEY' in .streamlit/secrets.toml")
         st.stop()
-    st.session_state.client = genai.Client(api_key=api_key)
+    st.session_state.client = Groq(api_key=api_key)
 
-# Session state reset on context change
+# Session state management
 current_context_key = f"{user_role}_{account_id}"
 if "last_context_key" not in st.session_state or st.session_state.last_context_key != current_context_key:
     st.session_state.last_context_key = current_context_key
     st.session_state.messages = []
-    
-    st.session_state.chat_session = st.session_state.client.chats.create(
-        model="gemini-3.6-flash",
-        config=types.GenerateContentConfig(
-            system_instruction=get_system_prompt(user_role, account_id, SNAPSHOT_TIME_STR),
-            tools=[search_documents, query_structured_data, execute_action],
-            temperature=0.1,
-        )
-    )
+
+# Define Tool Schemas for Groq (OpenAI format)
+GROQ_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_documents",
+            "description": "Searches policy, agreement, and SOP documents.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Search topic"}},
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_structured_data",
+            "description": "Queries order details from the database and computes SLA time deltas.",
+            "parameters": {
+                "type": "object",
+                "properties": {"order_id": {"type": "string", "description": "The exact ID of the order (e.g., ORD-1001)"}},
+                "required": ["order_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_action",
+            "description": "Creates an escalation ticket, processes a service credit, or cancels an order.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action_type": {"type": "string"},
+                    "details": {"type": "string"},
+                    "confirmed": {"type": "boolean", "description": "MUST be false initially. Set to true ONLY if user explicitly confirmed."}
+                },
+                "required": ["action_type", "details", "confirmed"]
+            }
+        }
+    }
+]
 
 # Render Chat
 for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+    if msg["role"] != "system" and msg["role"] != "tool" and not msg.get("tool_calls"):
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-# Chat Input & Safe Error Handling
+# Chat Input & Loop
 if prompt := st.chat_input("Ask a question, check order status, or request a service action..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Processing request and executing tools..."):
+        with st.spinner("Processing request..."):
             try:
-                response = st.session_state.chat_session.send_message(prompt)
-                st.markdown(response.text)
-                st.session_state.messages.append({"role": "assistant", "content": response.text})
-            except errors.APIError as e:
-                if e.code == 429:
-                    st.warning("⚠️ **High Traffic:** Free-tier rate limit reached. Please wait ~30 seconds and try again.")
+                # 1. Build conversation history
+                system_instruction = get_system_prompt(user_role, account_id, SNAPSHOT_TIME_STR)
+                messages_payload = [{"role": "system", "content": system_instruction}] + st.session_state.messages
+                
+                # 2. Call Groq
+                response = st.session_state.client.chat.completions.create(
+                    model="llama-3.1-70b-versatile",
+                    messages=messages_payload,
+                    tools=GROQ_TOOLS,
+                    tool_choice="auto",
+                    temperature=0.1
+                )
+                
+                response_message = response.choices[0].message
+                
+                # 3. Handle Tool Calls if the AI decides to use them
+                if response_message.tool_calls:
+                    # Append the AI's tool request to history
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "tool_calls": [t.model_dump() for t in response_message.tool_calls],
+                        "content": response_message.content or ""
+                    })
+                    messages_payload.append(response_message)
+                    
+                    # Execute each tool
+                    for tool_call in response_message.tool_calls:
+                        fn_name = tool_call.function.name
+                        args = json.loads(tool_call.function.arguments)
+                        
+                        if fn_name == "search_documents":
+                            tool_result = search_documents(args["query"])
+                        elif fn_name == "query_structured_data":
+                            tool_result = query_structured_data(args["order_id"])
+                        elif fn_name == "execute_action":
+                            tool_result = execute_action(args["action_type"], args["details"], args.get("confirmed", False))
+                        
+                        # Add tool result to context
+                        tool_msg = {
+                            "tool_call_id": tool_call.id,
+                            "role": "tool",
+                            "name": fn_name,
+                            "content": str(tool_result)
+                        }
+                        st.session_state.messages.append(tool_msg)
+                        messages_payload.append(tool_msg)
+                    
+                    # 4. Trigger second Groq call so it can read the tool results and answer
+                    final_response = st.session_state.client.chat.completions.create(
+                        model="llama-3.1-70b-versatile",
+                        messages=messages_payload,
+                        temperature=0.1
+                    )
+                    final_text = final_response.choices[0].message.content
+                    st.markdown(final_text)
+                    st.session_state.messages.append({"role": "assistant", "content": final_text})
+                
+                # Handle standard text response without tools
                 else:
-                    st.error(f"⚠️ API Error: {e.message}")
-                st.session_state.messages.pop()
+                    st.markdown(response_message.content)
+                    st.session_state.messages.append({"role": "assistant", "content": response_message.content})
+                    
             except Exception as e:
-                st.error("⚠️ An unexpected error occurred. Please try again.")
-                st.session_state.messages.pop()
+                st.error(f"⚠️ An error occurred: {str(e)}")
+                st.session_state.messages.pop() # Remove failed prompt to keep history clean
