@@ -105,7 +105,7 @@ if prompt := st.chat_input("Ask a question, check order status, or request a ser
                 
                 # 2. Call Groq
                 response = st.session_state.client.chat.completions.create(
-                    model="llama-3.1-70b-versatile",
+                    model="llama-3.3-70b-versatile",
                     messages=messages_payload,
                     tools=GROQ_TOOLS,
                     tool_choice="auto",
@@ -148,7 +148,7 @@ if prompt := st.chat_input("Ask a question, check order status, or request a ser
                     
                     # 4. Trigger second Groq call so it can read the tool results and answer
                     final_response = st.session_state.client.chat.completions.create(
-                        model="llama-3.1-70b-versatile",
+                        model="llama-3.3-70b-versatile",
                         messages=messages_payload,
                         temperature=0.1
                     )
