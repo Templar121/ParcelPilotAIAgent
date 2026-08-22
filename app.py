@@ -150,6 +150,7 @@ if prompt := st.chat_input("Ask a question, check order status, or request a ser
                     final_response = st.session_state.client.chat.completions.create(
                         model="openai/gpt-oss-120b",
                         messages=messages_payload,
+                        tools=GROQ_TOOLS,
                         temperature=0.1
                     )
                     final_text = final_response.choices[0].message.content
